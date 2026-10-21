@@ -9,7 +9,7 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir \
       "wyoming>=1.5.0" \
-      "numpy>=1.26,<3" \
+      "numpy>=1.26,<2" \
       "tflite-runtime==2.14.0"
 
 WORKDIR /app

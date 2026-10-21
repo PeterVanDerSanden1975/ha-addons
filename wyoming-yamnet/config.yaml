@@ -1,5 +1,5 @@
 name: Wyoming YAMNet
-version: "1.0.1"
+version: "1.0.2"
 slug: wyoming_yamnet
 description: Geluidsclassificatie (Google YAMNet) achter het Wyoming STT-protocol — blafdetectie voor het keukendisplay
 url: https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
