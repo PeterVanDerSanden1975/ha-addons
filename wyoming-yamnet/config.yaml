@@ -1,0 +1,29 @@
+name: Wyoming YAMNet
+version: "1.0.0"
+slug: wyoming_yamnet
+description: Geluidsclassificatie (Google YAMNet) achter het Wyoming STT-protocol — blafdetectie voor het keukendisplay
+url: https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
+arch:
+  - aarch64
+  - amd64
+startup: application
+init: false
+ports:
+  10310/tcp: 10310
+ports_description:
+  10310/tcp: Wyoming-protocol (STT)
+map:
+  - type: share
+    read_only: false
+options:
+  bewaar_fragmenten: true
+  bewaar_map: /share/blafdetectie
+  bewaar_alleen_blaf: false
+  threads: 2
+  log_level: info
+schema:
+  bewaar_fragmenten: bool
+  bewaar_map: str
+  bewaar_alleen_blaf: bool
+  threads: int(1,4)
+  log_level: list(debug|info|warning)
