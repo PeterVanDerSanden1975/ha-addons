@@ -37,14 +37,20 @@ DATA_DIR = Path(os.environ.get("YAMNET_DATA", "/data"))
 MODEL_PATH = DATA_DIR / "yamnet.tflite"
 CLASSMAP_PATH = DATA_DIR / "yamnet_class_map.csv"
 
-MODEL_URL = (
-    "https://storage.googleapis.com/tfhub-lite-models/google/lite-model/"
-    "yamnet/classification/tflite/1.tflite"
-)
-CLASSMAP_URL = (
-    "https://raw.githubusercontent.com/tensorflow/models/master/research/"
-    "audioset/yamnet/yamnet_class_map.csv"
-)
+# Zelfde YAMNet-lite-model (input float32 1x15600 @ 16 kHz, output 1x521 scores).
+# De oude tfhub-URL geeft 403 sinds TF Hub naar Kaggle is verhuisd; MediaPipe
+# host het model publiek. Meerdere bronnen op volgorde; lukt geen enkele, dan
+# wordt gekeken of het bestand handmatig in /share/blafdetectie is gezet.
+MODEL_URLS = [
+    "https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/latest/yamnet.tflite",
+    "https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite",
+    "https://storage.googleapis.com/tfhub-lite-models/google/lite-model/yamnet/classification/tflite/1.tflite",
+]
+CLASSMAP_URLS = [
+    "https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv",
+    "https://storage.googleapis.com/audioset/yamnet/yamnet_class_map.csv",
+]
+MANUAL_DIR = Path("/share/blafdetectie")   # handmatige fallback: yamnet.tflite / yamnet_class_map.csv hier neerzetten
 
 SAMPLE_RATE = 16000
 WINDOW = 15600          # 0.975 s, vaste invoerlengte van het YAMNet-lite-model
@@ -72,15 +78,39 @@ def load_options() -> dict:
     return opts
 
 
-def ensure_file(path: Path, url: str) -> None:
-    if path.exists() and path.stat().st_size > 0:
+def ensure_file(path: Path, urls: list[str], min_size: int = 1000) -> None:
+    if path.exists() and path.stat().st_size >= min_size:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    _LOGGER.info("Downloaden %s -> %s", url, path)
     tmp = path.with_suffix(path.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
-        f.write(r.read())
-    tmp.replace(path)
+
+    # 1) handmatig neergezet bestand
+    manual = MANUAL_DIR / path.name
+    if manual.exists() and manual.stat().st_size >= min_size:
+        _LOGGER.info("Gebruik handmatig bestand %s", manual)
+        path.write_bytes(manual.read_bytes())
+        return
+
+    # 2) downloaden, bronnen op volgorde
+    fouten = []
+    for url in urls:
+        try:
+            _LOGGER.info("Downloaden %s -> %s", url, path)
+            req = urllib.request.Request(url, headers={"User-Agent": "wyoming-yamnet/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+                f.write(r.read())
+            if tmp.stat().st_size < min_size:
+                raise OSError(f"te klein ({tmp.stat().st_size} B)")
+            tmp.replace(path)
+            return
+        except Exception as e:  # noqa: BLE001
+            fouten.append(f"{url}: {e}")
+            tmp.unlink(missing_ok=True)
+
+    raise RuntimeError(
+        f"{path.name} niet kunnen ophalen. Zet het bestand handmatig in {MANUAL_DIR} "
+        f"en herstart de add-on. Geprobeerd:\n  " + "\n  ".join(fouten)
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -88,8 +118,8 @@ class YamnetClassifier:
     def __init__(self, threads: int = 2) -> None:
         from tflite_runtime.interpreter import Interpreter
 
-        ensure_file(MODEL_PATH, MODEL_URL)
-        ensure_file(CLASSMAP_PATH, CLASSMAP_URL)
+        ensure_file(MODEL_PATH, MODEL_URLS, min_size=1_000_000)
+        ensure_file(CLASSMAP_PATH, CLASSMAP_URLS, min_size=5_000)
 
         self.names: list[str] = []
         with open(CLASSMAP_PATH, newline="") as f:
