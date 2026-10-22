@@ -8,7 +8,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-      "wyoming>=1.5.0" \
+      "wyoming>=1.5.0" "aiohttp>=3.9,<4" \
       "numpy>=1.26,<2" \
       "tflite-runtime==2.14.0"
 

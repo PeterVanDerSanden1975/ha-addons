@@ -68,6 +68,7 @@ def load_options() -> dict:
         "bewaar_alleen_blaf": False,
         "threads": 2,
         "log_level": "info",
+        "http_port": 10311,
     }
     p = Path("/data/options.json")
     if p.exists():
@@ -218,41 +219,92 @@ class YamnetHandler(AsyncEventHandler):
             return True
 
         if AudioStop.is_type(event.type):
+            t0 = time.monotonic()
             text = await asyncio.get_running_loop().run_in_executor(None, self._verwerk)
-            await self.write_event(Transcript(text=text).event())
-            _LOGGER.info("Resultaat: %s", text)
+            ms = (time.monotonic() - t0) * 1000
+            try:
+                await self.write_event(Transcript(text=text).event())
+                _LOGGER.info("Resultaat: %s (%.0f ms)", text, ms)
+            except (ConnectionResetError, BrokenPipeError, ConnectionError):
+                _LOGGER.warning(
+                    "Resultaat '%s' (%.0f ms) niet afgeleverd: HA sloot de verbinding "
+                    "voordat het antwoord gelezen was (pipeline afgebroken?)", text, ms)
             return False
 
         return True
 
     def _verwerk(self) -> str:
-        t0 = time.monotonic()
-        raw = bytes(self.audio)
-        if len(raw) < self.width * 1600:          # < 0,1 s: niks mee te beginnen
-            return "none 0.00 (leeg)"
-        x = self.clf.to_float16k(raw, self.rate, self.width, self.channels)
-        bark, top, top_score = self.clf.classify(x)
-        verdict = "bark" if top in BARK_CLASSES or bark >= 0.3 else "none"
-        text = f"{verdict} {bark:.2f} ({top} {top_score:.2f})"
-        _LOGGER.debug("fragment %.2fs, verwerkt in %.0f ms", len(x) / SAMPLE_RATE,
-                      (time.monotonic() - t0) * 1000)
+        r = verwerk_fragment(self.clf, self.opts, bytes(self.audio),
+                             self.rate, self.width, self.channels, bron="wyoming")
+        return r["text"]
 
-        if self.opts.get("bewaar_fragmenten") and (
-            verdict == "bark" or not self.opts.get("bewaar_alleen_blaf")
-        ):
-            try:
-                d = Path(self.opts.get("bewaar_map", "/share/blafdetectie"))
-                d.mkdir(parents=True, exist_ok=True)
-                stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-                p = d / f"{stamp}_{verdict}_{bark:.2f}.wav"
-                with wave.open(str(p), "wb") as w:
-                    w.setnchannels(1)
-                    w.setsampwidth(2)
-                    w.setframerate(SAMPLE_RATE)
-                    w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
-            except Exception as e:  # noqa: BLE001
-                _LOGGER.warning("fragment niet opgeslagen: %s", e)
-        return text
+
+# ----------------------------------------------------------------------------
+def verwerk_fragment(clf: YamnetClassifier, opts: dict, raw: bytes,
+                     rate: int, width: int, channels: int, bron: str = "http",
+                     extra: str = "") -> dict:
+    """Classificeert ruwe PCM en slaat het fragment optioneel op. Gedeeld door
+    het Wyoming- en het HTTP-pad."""
+    t0 = time.monotonic()
+    if len(raw) < width * channels * 1600:            # < 0,1 s: niks mee te beginnen
+        return {"verdict": "none", "bark": 0.0, "top": "leeg", "top_score": 0.0,
+                "seconds": 0.0, "ms": 0, "text": "none 0.00 (leeg 0.00)"}
+    x = clf.to_float16k(raw, rate, width, channels)
+    bark, top, top_score = clf.classify(x)
+    verdict = "bark" if top in BARK_CLASSES or bark >= 0.3 else "none"
+    ms = (time.monotonic() - t0) * 1000
+    text = f"{verdict} {bark:.2f} ({top} {top_score:.2f})"
+    _LOGGER.info("[%s] %s — fragment %.2f s, %.0f ms%s", bron, text, len(x) / SAMPLE_RATE, ms,
+                 f" ({extra})" if extra else "")
+
+    if opts.get("bewaar_fragmenten") and (verdict == "bark" or not opts.get("bewaar_alleen_blaf")):
+        try:
+            d = Path(opts.get("bewaar_map", "/share/blafdetectie"))
+            d.mkdir(parents=True, exist_ok=True)
+            stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            p = d / f"{stamp}_{verdict}_{bark:.2f}_{top.replace(' ', '-')}.wav"
+            with wave.open(str(p), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning("fragment niet opgeslagen: %s", e)
+    return {"verdict": verdict, "bark": round(float(bark), 3), "top": top,
+            "top_score": round(float(top_score), 3), "seconds": round(len(x) / SAMPLE_RATE, 2),
+            "ms": int(ms), "text": text}
+
+
+# ----------------------------------------------------------------------------
+# HTTP-endpoint voor het keukendisplay (ESPHome http_request.post, ruwe PCM):
+#   POST /classify?rate=16000&bits=16&ch=1[&flanken=..&piek=..]   body = PCM
+#   -> 200 {"verdict":"bark","bark":0.87,"top":"Bark","top_score":0.91,"seconds":3.5,"ms":84}
+#   GET  /health -> 200 {"ok":true}
+def maak_http_app(clf: YamnetClassifier, opts: dict):
+    from aiohttp import web
+
+    async def classify(request: "web.Request") -> "web.Response":
+        try:
+            rate = int(request.query.get("rate", SAMPLE_RATE))
+            bits = int(request.query.get("bits", 16))
+            ch = int(request.query.get("ch", 1))
+        except ValueError:
+            return web.json_response({"error": "rate/bits/ch ongeldig"}, status=400)
+        if bits not in (8, 16, 32) or ch < 1 or rate < 8000:
+            return web.json_response({"error": "rate/bits/ch buiten bereik"}, status=400)
+        raw = await request.read()
+        extra = ", ".join(f"{k}={v}" for k, v in request.query.items() if k in ("flanken", "piek"))
+        r = await asyncio.get_running_loop().run_in_executor(
+            None, verwerk_fragment, clf, opts, raw, rate, bits // 8, ch, "http", extra)
+        r.pop("text", None)
+        return web.json_response(r)
+
+    async def health(_: "web.Request") -> "web.Response":
+        return web.json_response({"ok": True, "model": "yamnet", "bark_classes": sorted(BARK_CLASSES)})
+
+    app = web.Application(client_max_size=8 * 1024 * 1024)
+    app.add_routes([web.post("/classify", classify), web.get("/health", health)])
+    return app
 
 
 # ----------------------------------------------------------------------------
@@ -285,6 +337,13 @@ async def main() -> None:
             )
         ]
     )
+
+    from aiohttp import web
+    http_port = int(opts.get("http_port", 10311))
+    runner = web.AppRunner(maak_http_app(clf, opts))
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", http_port).start()
+    _LOGGER.info("HTTP-endpoint luistert op http://0.0.0.0:%d/classify", http_port)
 
     uri = os.environ.get("WYOMING_URI", "tcp://0.0.0.0:10310")
     server = AsyncServer.from_uri(uri)

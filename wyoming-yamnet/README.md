@@ -1,14 +1,18 @@
 # Wyoming YAMNet — blafverificatie voor het keukendisplay
 
-Lokale HA OS add-on. Doet zich voor als Wyoming STT-server, maar draait Google
-YAMNet (521 AudioSet-klassen) op het audiofragment dat het keukendisplay via de
-Assist-pipeline instuurt. Antwoord komt als 'transcript' terug:
+HA OS add-on die Google YAMNet (521 AudioSet-klassen) op een audiofragment draait
+en zegt of er een hond in zit. Twee ingangen:
 
-    bark 0.87 (Bark 0.87)
-    none 0.04 (Speech 0.81)
+- **HTTP (gebruikt door het keukendisplay, v53+)** — poort 10311:
+  `POST /classify?rate=16000&bits=16&ch=1` met ruwe PCM als body →
+  `{"verdict":"bark","bark":0.87,"top":"Bark","top_score":0.91,"seconds":3.5,"ms":84}`.
+  Het display knipt zelf 1 s vóór + 2,5 s na de triggerflank uit zijn ringbuffer.
+  Geen Assist-pipeline, geen HA-VAD, geen TTS.
+- **Wyoming STT** — poort 10310, optioneel. Antwoord als 'transcript':
+  `bark 0.87 (Bark 0.87)` / `none 0.04 (Speech 0.81)`. Alleen nodig als je het via
+  een Assist-pipeline wilt gebruiken; voor het display niet meer.
 
-Het display (`voice_assistant.on_stt_end`) leest de eerste twee tokens en beslist
-zelf over de melding (number **Blaf score minimum**).
+`GET /health` geeft `{"ok":true,...}`.
 
 ## Installatie (HA OS, Pi 5)
 
@@ -20,17 +24,12 @@ zelf over de melding (number **Blaf score minimum**).
 3. Opties laten staan, **Starten**. Bij de eerste start haalt de add-on het model
    (~4 MB) en de klassenlijst op naar `/data`. Log moet eindigen met
    `Wyoming-YAMNet luistert op tcp://0.0.0.0:10310`.
-4. Instellingen → Apparaten & diensten → Integratie toevoegen → **Wyoming Protocol**
-   → host `localhost` (of het LAN-IP van de Pi), poort `10310`.
-5. Instellingen → Spraakassistenten → **Assistent toevoegen**:
-   - Naam: `Blafdetectie`
-   - Taal: Nederlands
-   - Conversatie-agent: Home Assistant
-   - Spraak-naar-tekst: `yamnet`
-   - Tekst-naar-spraak: geen
-   - Wake word: geen
-6. Instellingen → Apparaten → **Keukendisplay** → Configureren (tandwiel bij
-   *Voice assistant*) → pipeline **Blafdetectie** kiezen.
+4. Klaar. Het display praat rechtstreeks met poort 10311 (`yamnet_url` in de
+   substitutions van de display-yaml). Test vanaf een pc:
+   `curl http://<pi-ip>:10311/health`.
+
+De Wyoming-integratie en de pipeline "Blafdetectie" uit v48–v52 zijn niet meer
+nodig en kunnen weg.
 
 ## Opties
 
@@ -40,7 +39,8 @@ zelf over de melding (number **Blaf score minimum**).
 | `bewaar_map` | `/share/blafdetectie` | Map voor de WAV's (naam: `datum_tijd_bark|none_score.wav`) |
 | `bewaar_alleen_blaf` | `false` | Alleen fragmenten met oordeel `bark` bewaren |
 | `threads` | `2` | TFLite-threads |
-| `log_level` | `info` | `debug` logt ook de verwerkingstijd per fragment |
+| `log_level` | `info` | `debug` logt meer detail |
+| `http_port` | `10311` | Poort van het HTTP-endpoint |
 
 ## Afstellen
 
